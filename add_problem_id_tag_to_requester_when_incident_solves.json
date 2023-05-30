@@ -1,0 +1,145 @@
+{
+  "name": "Example ZIS integration with conditional branching",
+  "description": "Send webhook when ticket status change to solved",
+  "zis_template_version": "2019-10-14",
+  "resources": {
+    "action_get_ticket": {
+      "type": "ZIS::Action::Http",
+      "properties": {
+        "name": "action_get_ticket",
+        "definition": {
+          "method": "GET",
+          "path.$": "/api/v2/tickets/{{$.ticketId}}",
+          "connectionName": "zendesk",
+          "headers": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      }
+    },
+    "action_update_user": {
+      "type": "ZIS::Action::Http",
+      "properties": {
+        "name": "action_update_user",
+        "definition": {
+          "method": "PUT",
+          "path.$": "/api/v2/users/{{$.requesterId}}/tags",
+          "connectionName": "zendesk",
+          "headers": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "requestBody": "{{$.userPayload}}"
+        }
+      }
+    },
+    "TicketStatusChangedFlow": {
+      "type": "ZIS::Flow",
+      "properties": {
+        "name": "TicketStatusChangedFlow",
+        "definition": {
+          "StartAt": "CheckStatusAndType",
+          "States": {
+            "CheckStatusAndType": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$.input.ticket_event.current",
+                      "StringEquals": "solved"
+                    },
+                    {
+                      "Variable": "$.input.ticket_event.ticket.type",
+                      "StringEquals": "incident"
+                    }
+                  ],
+                  "Next": "GetFullTicket"
+                }
+              ],
+              "Default": "Finish"
+            },
+            "GetFullTicket": {
+              "Type": "Action",
+              "ActionName": "zis:%INTEGRATION_NAME%:action:action_get_ticket",
+              "Parameters": {
+                "ticketId.$": "{{$.input.ticket_event.ticket.id}}",
+                "accessToken.$": "$.connections.zendesk.access_token"
+              },
+              "ResultPath": "$.model.fullTicket",
+              "Next": "ExtractProblemId"
+            },
+            "ExtractProblemId": {
+              "Type": "Action",
+              "ActionName": "zis:common:transform:Jq",
+              "Parameters": {
+                "expr": ".fullTicket.ticket.problem_id | tostring",
+                "data.$": "$.model"
+              },
+              "ResultPath": "$.model.problemIdValue",
+              "Next": "CheckIfValueIsSet"
+            },
+            "CheckIfValueIsSet": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Not": {
+                    "Variable": "$.model.problemIdValue",
+                    "StringEquals": "null"
+                  },
+                  "Next": "PrepUserPayload"
+                }
+              ],
+              "Default": "Finish"
+            },
+            "PrepUserPayload": {
+              "Type": "Pass",
+              "Result": {
+                "custom_param_key": "tags",
+                "custom_param_value": "problem_"
+              },
+              "ResultPath": "$.custom_param",
+              "Next": "ConstructUserPayload"
+            },
+            "ConstructUserPayload": {
+              "Type": "Action",
+              "ActionName": "zis:common:transform:Jq",
+              "Parameters": {
+                "data.$": "$",
+                "expr": "{ (.custom_param.custom_param_key): [(.custom_param.custom_param_value + .model.problemIdValue)] }"
+              },
+              "ResultPath": "$.custom_request_body",
+              "Next": "UpdateRequesterTag"
+            },
+            "UpdateRequesterTag": {
+              "Type": "Action",
+              "ActionName": "zis:%INTEGRATION_NAME%:action:action_update_user",
+              "Parameters": {
+                "requesterId.$": "$.input.ticket_event.ticket.requester_id",
+                "userPayload.$": "$.custom_request_body"
+              },
+              "Next": "Finish"
+            },
+            "Finish": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      }
+    },
+    "TicketStatusChangedJobSpec": {
+      "type": "ZIS::JobSpec",
+      "properties": {
+        "name": "TicketStatusChangedJobSpec",
+        "event_source": "support",
+        "event_type": "ticket.StatusChanged",
+        "flow_name": "zis:%INTEGRATION_NAME%:flow:TicketStatusChangedFlow"
+      }
+    }
+  }
+}
